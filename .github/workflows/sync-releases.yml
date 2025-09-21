@@ -1,20 +1,22 @@
-name: Sync Upstream Releases
+name: Sync Full Releases
 on:
+  schedule:
   workflow_dispatch:  # 允许手动触发
 
 jobs:
   sync-releases:
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # 需要创建标签和Release的权限
+      contents: write  # 需创建Releases和上传资产的权限
     env:
-      GH_TOKEN: ${{ github.token }}  # 全局设置GH_TOKEN环境变量
+      GH_TOKEN: ${{ github.token }}
+      UPSTREAM_REPO: "elseif/MikroTikPatch"
 
     steps:
-      - name: Checkout fork repo
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # 拉取完整历史，包括标签
+          fetch-depth: 0  # 拉取完整历史
 
       - name: Install GitHub CLI
         run: |
@@ -25,80 +27,45 @@ jobs:
           sudo apt update
           sudo apt install gh -y
 
-      - name: Sync RouterOS 6 releases
+      - name: Get upstream releases info
+        id: upstream-releases
         run: |
-          UPSTREAM="elseif/MikroTikPatch"
-          FORK="${{ github.repository }}"
-          
-          # 获取上游所有releases（限制100个）
-          gh release list -R $UPSTREAM --limit 100 | while read -r tag rest; do
-            # 匹配RouterOS 6版本标签（格式如6.49.19）
-            if [[ $tag =~ ^6\.[0-9]+\.[0-9]+$ ]]; then
-              # 检查当前仓库是否已存在该release
-              if ! gh release view $tag -R $FORK > /dev/null 2>&1; then
-                echo "开始同步release: $tag"
-                
-                # 创建临时目录存放资产文件
-                mkdir -p /tmp/releases
-                cd /tmp/releases
-                
-                # 下载上游release的所有资产
-                gh release download $tag -R $UPSTREAM
-                
-                # 创建并推送标签
-                git tag $tag
-                git push origin $tag
-                
-                # 创建release并上传资产
-                gh release create $tag ./* \
-                  --title "RouterOS $tag" \
-                  --notes "$(gh release view $tag -R $UPSTREAM --json body -q .body)" \
-                  --prerelease false
-                
-                # 清理临时文件
-                cd -
-                rm -rf /tmp/releases
-              else
-                echo "release $tag 已存在，跳过"
-              fi
-            fi
-          done
+          # 获取上游所有Releases的完整信息（包括资产、描述等）
+          gh api repos/$UPSTREAM_REPO/releases --jq '.[] | .tag_name' > upstream_tags.txt
+          echo "Found $(wc -l < upstream_tags.txt) releases in upstream"
 
-      - name: Sync RouterOS 7 releases
+      - name: Sync each release
         run: |
-          UPSTREAM="elseif/MikroTikPatch"
-          FORK="${{ github.repository }}"
-          
-          # 获取上游所有releases（限制100个）
-          gh release list -R $UPSTREAM --limit 100 | while read -r tag rest; do
-            # 匹配RouterOS 7版本标签（格式如7.19.2、7.19.2-arm64）
-            if [[ $tag =~ ^7\.[0-9]+\.[0-9]+(-arm64|-arm)?$ ]]; then
-              # 检查当前仓库是否已存在该release
-              if ! gh release view $tag -R $FORK > /dev/null 2>&1; then
-                echo "开始同步release: $tag"
-                
-                # 创建临时目录存放资产文件
-                mkdir -p /tmp/releases
-                cd /tmp/releases
-                
-                # 下载上游release的所有资产
-                gh release download $tag -R $UPSTREAM
-                
-                # 创建并推送标签
-                git tag $tag
-                git push origin $tag
-                
-                # 创建release并上传资产（保留预发布状态）
-                gh release create $tag ./* \
-                  --title "RouterOS $tag" \
-                  --notes "$(gh release view $tag -R $UPSTREAM --json body -q .body)" \
-                  --prerelease $([[ $rest == *"prerelease"* ]] && echo "true" || echo "false")
-                
-                # 清理临时文件
-                cd -
-                rm -rf /tmp/releases
-              else
-                echo "release $tag 已存在，跳过"
-              fi
+          while read -r tag; do
+            echo "Processing release: $tag"
+            
+            # 检查目标仓库是否已存在该Release（不仅是标签）
+            if ! gh release view "$tag" >/dev/null 2>&1; then
+              echo "Starting sync for release: $tag"
+              
+              # 创建临时目录
+              mkdir -p /tmp/release_assets
+              cd /tmp/release_assets
+              
+              # 1. 下载上游Release的所有资产文件
+              gh release download "$tag" -R "$UPSTREAM_REPO"
+              
+              # 2. 获取上游Release的元数据（标题、描述、状态）
+              title=$(gh release view "$tag" -R "$UPSTREAM_REPO" --json name -q .name)
+              body=$(gh release view "$tag" -R "$UPSTREAM_REPO" --json body -q .body)
+              prerelease=$(gh release view "$tag" -R "$UPSTREAM_REPO" --json prerelease -q .prerelease)
+              
+              # 3. 在当前仓库创建完整Release（含资产）
+              gh release create "$tag" ./* \
+                --title "$title" \
+                --body "$body" \
+                --prerelease "$prerelease"
+              
+              # 清理临时文件
+              cd -
+              rm -rf /tmp/release_assets
+              echo "Successfully synced release: $tag"
+            else
+              echo "Release $tag already exists, skipping"
             fi
-          done
+          done < upstream_tags.txt
