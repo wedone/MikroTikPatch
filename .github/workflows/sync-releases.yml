@@ -1,19 +1,22 @@
 name: Sync Upstream Releases
 on:
   schedule:
-    - cron: "0 0 * * *"  # 每天 UTC 0 点运行一次
+    # - cron: "0 0 * * *"  # 每天UTC 0点运行
   workflow_dispatch:  # 允许手动触发
 
 jobs:
   sync-releases:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: write  # 需要创建标签和Release的权限
+    env:
+      GH_TOKEN: ${{ github.token }}  # 全局设置GH_TOKEN环境变量
+
     steps:
       - name: Checkout fork repo
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 0  # 拉取完整历史，包括标签
 
       - name: Install GitHub CLI
         run: |
@@ -24,32 +27,27 @@ jobs:
           sudo apt update
           sudo apt install gh -y
 
-      - name: Configure GitHub CLI
-        run: gh auth setup-git
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Sync RouterOS 6 releases
         run: |
           UPSTREAM="elseif/MikroTikPatch"
           FORK="${{ github.repository }}"
           
-          # 获取上游所有releases
+          # 获取上游所有releases（限制100个）
           gh release list -R $UPSTREAM --limit 100 | while read -r tag rest; do
-            # 过滤RouterOS 6版本标签 (格式如6.49.19)
+            # 匹配RouterOS 6版本标签（格式如6.49.19）
             if [[ $tag =~ ^6\.[0-9]+\.[0-9]+$ ]]; then
-              # 检查当前仓库是否已存在该tag
+              # 检查当前仓库是否已存在该release
               if ! gh release view $tag -R $FORK > /dev/null 2>&1; then
-                echo "Syncing release $tag from upstream..."
+                echo "开始同步release: $tag"
                 
-                # 创建临时目录
+                # 创建临时目录存放资产文件
                 mkdir -p /tmp/releases
                 cd /tmp/releases
                 
-                # 下载上游release资产
+                # 下载上游release的所有资产
                 gh release download $tag -R $UPSTREAM
                 
-                # 创建本地tag
+                # 创建并推送标签
                 git tag $tag
                 git push origin $tag
                 
@@ -59,10 +57,11 @@ jobs:
                   --notes "$(gh release view $tag -R $UPSTREAM --json body -q .body)" \
                   --prerelease false
                 
+                # 清理临时文件
                 cd -
                 rm -rf /tmp/releases
               else
-                echo "Release $tag already exists, skipping..."
+                echo "release $tag 已存在，跳过"
               fi
             fi
           done
@@ -72,35 +71,36 @@ jobs:
           UPSTREAM="elseif/MikroTikPatch"
           FORK="${{ github.repository }}"
           
-          # 获取上游所有releases
+          # 获取上游所有releases（限制100个）
           gh release list -R $UPSTREAM --limit 100 | while read -r tag rest; do
-            # 过滤RouterOS 7版本标签 (格式如7.19.2、7.19.2-arm64等)
+            # 匹配RouterOS 7版本标签（格式如7.19.2、7.19.2-arm64）
             if [[ $tag =~ ^7\.[0-9]+\.[0-9]+(-arm64|-arm)?$ ]]; then
-              # 检查当前仓库是否已存在该tag
+              # 检查当前仓库是否已存在该release
               if ! gh release view $tag -R $FORK > /dev/null 2>&1; then
-                echo "Syncing release $tag from upstream..."
+                echo "开始同步release: $tag"
                 
-                # 创建临时目录
+                # 创建临时目录存放资产文件
                 mkdir -p /tmp/releases
                 cd /tmp/releases
                 
-                # 下载上游release资产
+                # 下载上游release的所有资产
                 gh release download $tag -R $UPSTREAM
                 
-                # 创建本地tag
+                # 创建并推送标签
                 git tag $tag
                 git push origin $tag
                 
-                # 创建release并上传资产
+                # 创建release并上传资产（保留预发布状态）
                 gh release create $tag ./* \
                   --title "RouterOS $tag" \
                   --notes "$(gh release view $tag -R $UPSTREAM --json body -q .body)" \
                   --prerelease $([[ $rest == *"prerelease"* ]] && echo "true" || echo "false")
                 
+                # 清理临时文件
                 cd -
                 rm -rf /tmp/releases
               else
-                echo "Release $tag already exists, skipping..."
+                echo "release $tag 已存在，跳过"
               fi
             fi
           done
