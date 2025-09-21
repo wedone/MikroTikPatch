@@ -31,7 +31,7 @@ jobs:
       - name: Get upstream releases info
         id: upstream-releases
         run: |
-          # 获取上游所有Releases的完整信息（包括资产、描述等）
+          # 获取上游所有Releases的标签
           gh api repos/$UPSTREAM_REPO/releases --jq '.[] | .tag_name' > upstream_tags.txt
           echo "Found $(wc -l < upstream_tags.txt) releases in upstream"
 
@@ -40,7 +40,7 @@ jobs:
           while read -r tag; do
             echo "Processing release: $tag"
             
-            # 检查目标仓库是否已存在该Release（不仅是标签）
+            # 检查目标仓库是否已存在该Release
             if ! gh release view "$tag" >/dev/null 2>&1; then
               echo "Starting sync for release: $tag"
               
@@ -51,10 +51,11 @@ jobs:
               # 1. 下载上游Release的所有资产文件
               gh release download "$tag" -R "$UPSTREAM_REPO"
               
-              # 2. 获取上游Release的元数据（标题、描述、状态）
+              # 2. 获取上游Release的元数据（使用正确的JSON字段）
               title=$(gh release view "$tag" -R "$UPSTREAM_REPO" --json name -q .name)
               body=$(gh release view "$tag" -R "$UPSTREAM_REPO" --json body -q .body)
-              prerelease=$(gh release view "$tag" -R "$UPSTREAM_REPO" --json prerelease -q .prerelease)
+              # 修复：使用正确的字段名isPrerelease
+              prerelease=$(gh release view "$tag" -R "$UPSTREAM_REPO" --json isPrerelease -q .isPrerelease)
               
               # 3. 在当前仓库创建完整Release（含资产）
               gh release create "$tag" ./* \
