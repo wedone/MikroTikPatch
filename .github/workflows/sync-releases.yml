@@ -1,70 +1,103 @@
-name: Manual Sync Releases
+name: Sync Upstream Releases
+
 on:
-  workflow_dispatch:  # 仅允许手动触发
+  # 手动触发
+  workflow_dispatch:
 
 jobs:
   sync-releases:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    env:
-      GH_TOKEN: ${{ github.token }}
-      UPSTREAM_REPO: "elseif/MikroTikPatch"
-
     steps:
-      - name: Checkout repository
+      - name: Checkout own repo
         uses: actions/checkout@v4
+
+      - name: Sync Releases from Upstream
+        uses: actions/github-script@v7
         with:
-          fetch-depth: 0
+          github-token: ${{ secrets.PAT }}
+          script: |
+            const { owner: upstreamOwner, repo: upstreamRepo } = context.repo; // 默认假设同仓库名，建议使用secret
+            // 从secret获取上游仓库，若未设置则默认使用 'elseif/MikroTikPatch'
+            const upstreamRepoFull = '${{ secrets.UPSTREAM_REPO || 'elseif/MikroTikPatch' }}';
+            const [upstreamOwnerActual, upstreamRepoActual] = upstreamRepoFull.split('/');
 
-      - name: Install GitHub CLI
-        run: |
-          type -p curl >/dev/null || (sudo apt update && sudo apt install curl -y)
-          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
-          sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
-          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
-          sudo apt update
-          sudo apt install gh -y
+            // 1. 获取上游仓库的releases列表
+            const upstreamReleases = await github.rest.repos.listReleases({
+                owner: upstreamOwnerActual,
+                repo: upstreamRepoActual,
+            });
 
-      - name: Get upstream releases info
-        id: upstream-releases
-        run: |
-          gh api repos/$UPSTREAM_REPO/releases --jq '.[] | .tag_name' > upstream_tags.txt
-          echo "Found $(wc -l < upstream_tags.txt) releases in upstream"
+            // 2. 获取自己仓库的releases列表 (用于比较)
+            const myReleases = await github.rest.repos.listReleases({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+            });
 
-      - name: Sync each release
-        run: |
-          # 修复：移除了嵌套的while循环
-          while read -r tag; do
-            echo "Processing release: $tag"
-            
-            # 检查目标仓库是否已存在该Release
-            if ! gh release view "$tag" >/dev/null 2>&1; then
-              echo "Starting sync for release: $tag"
-              
-              # 创建临时目录
-              mkdir -p /tmp/release_assets
-              cd /tmp/release_assets
-              
-              # 1. 下载上游Release的所有资产文件
-              gh release download "$tag" -R "$UPSTREAM_REPO"
-              
-              # 2. 获取上游Release的元数据
-              title=$(gh release view "$tag" -R "$UPSTREAM_REPO" --json name -q .name)
-              body=$(gh release view "$tag" -R "$UPSTREAM_REPO" --json body -q .body)
-              prerelease=$(gh release view "$tag" -R "$UPSTREAM_REPO" --json isPrerelease -q .isPrerelease)
-              
-              # 3. 修复：使用--notes替代--body参数
-              gh release create "$tag" ./* \
-                --title "$title" \
-                --notes "$body" \
-                --prerelease "$prerelease"
-              
-              # 清理临时文件
-              cd -
-              rm -rf /tmp/release_assets
-              echo "Successfully synced release: $tag"
-            else
-              echo "Release $tag already exists, skipping"
-            fi
-          done < upstream_tags.txt
+            // 简单的基于tag_name的匹配Set，用于判断上游release是否已存在
+            const myReleaseTagNames = new Set(myReleases.data.map(release => release.tag_name));
+
+            // 3. 遍历上游releases
+            for (const upstreamRelease of upstreamReleases.data) {
+                // 检查是否已存在此tag的release
+                if (myReleaseTagNames.has(upstreamRelease.tag_name)) {
+                    console.log(`Release ${upstreamRelease.tag_name} already exists in this repo. Skipping.`);
+                    continue;
+                }
+
+                console.log(`Processing upstream release: ${upstreamRelease.tag_name}`);
+
+                // 4. 在自己的仓库创建对应的release（草稿或发布状态，此处设为草稿以便检查）
+                let newRelease;
+                try {
+                    newRelease = await github.rest.repos.createRelease({
+                        owner: context.repo.owner,
+                        repo: context.repo.repo,
+                        tag_name: upstreamRelease.tag_name,
+                        name: upstreamRelease.name || `Synced: ${upstreamRelease.tag_name}`,
+                        body: `This release was automatically synced from ${upstreamRepoFull}.\n\n---\n\nOriginal description:\n\n${upstreamRelease.body || 'No description provided.'}`,
+                        draft: true, // 先创建为草稿，手动检查后发布
+                        prerelease: upstreamRelease.prerelease,
+                        // target_commitish: 如果需要关联特定提交，可能需要额外逻辑
+                    });
+                    console.log(`Draft release created for tag ${upstreamRelease.tag_name}`);
+                } catch (createError) {
+                    console.error(`Failed to create draft release for tag ${upstreamRelease.tag_name}:`, createError);
+                    continue; // 跳过这个release的处理
+                }
+
+                // 5. 下载并重新上传每个资产 (asset)
+                const assets = upstreamRelease.assets || [];
+                for (const asset of assets) {
+                    console.log(`Processing asset: ${asset.name}`);
+                    try {
+                        // 下载资产
+                        const downloadResponse = await fetch(asset.browser_download_url);
+                        if (!downloadResponse.ok) {
+                            throw new Error(`Failed to download asset: ${downloadResponse.status} ${downloadResponse.statusText}`);
+                        }
+                        const assetBuffer = Buffer.from(await downloadResponse.arrayBuffer());
+
+                        // 上传资产到新创建的release
+                        await github.rest.repos.uploadReleaseAsset({
+                            owner: context.repo.owner,
+                            repo: context.repo.repo,
+                            release_id: newRelease.data.id,
+                            name: asset.name,
+                            data: assetBuffer, // GitHub Actions 的 github-script v6+ 支持 data 属性
+                            headers: {
+                                'content-type': asset.content_type || 'application/octet-stream',
+                                'content-length': asset.size
+                            },
+                        });
+                        console.log(`Asset ${asset.name} uploaded successfully.`);
+                    } catch (assetError) {
+                        console.error(`Error processing asset ${asset.name}:`, assetError);
+                    }
+                }
+
+                // 可选：在这里自动发布release，如果你有信心完全自动化
+                // await github.rest.repos.updateRelease({ owner: context.repo.owner, repo: context.repo.repo, release_id: newRelease.data.id, draft: false });
+
+                console.log(`Finished processing release ${upstreamRelease.tag_name}`);
+            }
+            console.log('Sync process completed.');
