@@ -1,8 +1,6 @@
-name: Sync Full Releases
+name: Manual Sync Releases
 on:
-  schedule:
-    - cron: "0 0 * * *"  # 每天UTC 0点运行
-  workflow_dispatch:  # 允许手动触发
+  workflow_dispatch:  # 仅允许手动触发，移除定时任务
 
 jobs:
   sync-releases:
@@ -51,16 +49,15 @@ jobs:
               # 1. 下载上游Release的所有资产文件
               gh release download "$tag" -R "$UPSTREAM_REPO"
               
-              # 2. 获取上游Release的元数据（使用正确的JSON字段）
+              # 2. 获取上游Release的元数据
               title=$(gh release view "$tag" -R "$UPSTREAM_REPO" --json name -q .name)
               body=$(gh release view "$tag" -R "$UPSTREAM_REPO" --json body -q .body)
-              # 修复：使用正确的字段名isPrerelease
               prerelease=$(gh release view "$tag" -R "$UPSTREAM_REPO" --json isPrerelease -q .isPrerelease)
               
-              # 3. 在当前仓库创建完整Release（含资产）
+              # 3. 在当前仓库创建完整Release
               gh release create "$tag" ./* \
                 --title "$title" \
-                --body "$body" \
+                --notes "$body" \
                 --prerelease "$prerelease"
               
               # 清理临时文件
