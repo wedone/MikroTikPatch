@@ -1,12 +1,12 @@
 name: Manual Sync Releases
 on:
-  workflow_dispatch:  # 仅允许手动触发，移除定时任务
+  workflow_dispatch:  # 仅允许手动触发
 
 jobs:
   sync-releases:
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # 需创建Releases和上传资产的权限
+      contents: write
     env:
       GH_TOKEN: ${{ github.token }}
       UPSTREAM_REPO: "elseif/MikroTikPatch"
@@ -15,7 +15,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # 拉取完整历史
+          fetch-depth: 0
 
       - name: Install GitHub CLI
         run: |
@@ -29,12 +29,12 @@ jobs:
       - name: Get upstream releases info
         id: upstream-releases
         run: |
-          # 获取上游所有Releases的标签
           gh api repos/$UPSTREAM_REPO/releases --jq '.[] | .tag_name' > upstream_tags.txt
           echo "Found $(wc -l < upstream_tags.txt) releases in upstream"
 
       - name: Sync each release
         run: |
+          # 修复：移除了嵌套的while循环
           while read -r tag; do
             echo "Processing release: $tag"
             
@@ -54,7 +54,7 @@ jobs:
               body=$(gh release view "$tag" -R "$UPSTREAM_REPO" --json body -q .body)
               prerelease=$(gh release view "$tag" -R "$UPSTREAM_REPO" --json isPrerelease -q .isPrerelease)
               
-              # 3. 在当前仓库创建完整Release
+              # 3. 修复：使用--notes替代--body参数
               gh release create "$tag" ./* \
                 --title "$title" \
                 --notes "$body" \
